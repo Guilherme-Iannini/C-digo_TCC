@@ -1,0 +1,113 @@
+#include <WiFi.h>
+#include <IOXhop_FirebaseESP32.h>
+#include <ArduinoJson.h>
+
+// Configurações do Firebase
+#define FIREBASE_HOST "https://tcc-guilherme-iannini-cd725-default-rtdb.firebaseio.com"
+#define FIREBASE_AUTH "h2dXQeBAH6jwjxRZFrLlLJXBS3m136GXiq7DbJGM"
+
+// Configuração da rede Wi-Fi
+const char* ssid = "Gui";
+const char* password = "guiga123";
+
+// Declaração de pinos e variáveis
+#define ANALOG_PIN_0 35
+#define PINO_RELE 27
+
+const float tensaoAC = 127.0;
+const float sensibilidadeSensor = 0.1;
+const float kilowattHora = 0.8;
+
+float correnteRms = 0;
+float potencia = 0;
+unsigned long tempoLigado = 0;
+float valorTotal = 0;
+String statusEquipamento = "desligado";
+
+unsigned long ultimoEnvio = 0; // Para controle do tempo
+
+void configurarWiFi() {
+  WiFi.begin(ssid, password);
+  Serial.print("Conectando ao Wi-Fi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWi-Fi conectado.");
+}
+
+float calcularCorrenteRMS() {
+  float somaQuadrados = 0;
+  for (int i = 0; i < 500; i++) {
+    int leitura = analogRead(ANALOG_PIN_0) - 1414;
+    somaQuadrados += (leitura * leitura);
+    delay(1);
+  }
+  float aux = sqrt(somaQuadrados / 500) * (2.5 / 4096);
+  float corrente = aux / 0.1;
+
+  if (corrente > 0.4) {
+    corrente = ((1.6756206079905 * corrente * corrente) - (1.29072219862749 * corrente) + 0.643181961281189);
+  }
+  
+  return corrente;
+}
+
+void setup() {
+  Serial.begin(115200);
+  configurarWiFi();
+  Firebase.begin(FIREBASE_HOST, FIREBASE_AUTH);
+
+  pinMode(PINO_RELE, OUTPUT);
+  digitalWrite(PINO_RELE, HIGH);
+
+  int tempoLido = Firebase.getInt("/Tomada1/Tempo_de_Uso/Segundos");
+  if (tempoLido >= 0) {
+    tempoLigado = tempoLido;
+  } else {
+    tempoLigado = 0;
+  }
+}
+
+void loop() {
+  if (millis() - ultimoEnvio >= 10000) {
+    ultimoEnvio = millis();
+
+    String statusLido = Firebase.getString("/Tomada1/Status");
+    if (statusLido.length() > 0) {
+      statusEquipamento = statusLido;
+    }
+
+    Serial.print("Status do equipamento: ");
+    Serial.println(statusEquipamento);
+
+    if (statusEquipamento == "Ligado") {
+      digitalWrite(PINO_RELE, LOW);
+    } else {
+      digitalWrite(PINO_RELE, HIGH);
+    }
+
+    correnteRms = calcularCorrenteRMS();
+    potencia = correnteRms * tensaoAC;
+
+    if (correnteRms > 0.1) {
+      tempoLigado += 10;
+    }
+
+    int dias = tempoLigado / 86400;
+    int horas = (tempoLigado % 86400) / 3600;
+    int minutos = (tempoLigado % 3600) / 60;
+    int segundos = tempoLigado % 60;
+
+    Firebase.setInt("/Tomada1/Tempo_de_Uso/Segundos", tempoLigado);
+    Firebase.setInt("/Tomada1/Tempo_de_Uso/Minutos", minutos);
+    Firebase.setInt("/Tomada1/Tempo_de_Uso/Horas", horas);
+    Firebase.setInt("/Tomada1/Tempo_de_Uso/Dias", dias);
+
+    Serial.print("Tempo ligado: ");
+    Serial.print(dias); Serial.print(" dias, ");
+    Serial.print(horas); Serial.print(" horas, ");
+    Serial.print(minutos); Serial.print(" minutos, ");
+    Serial.print(segundos); Serial.println(" segundos.");
+  }
+}
