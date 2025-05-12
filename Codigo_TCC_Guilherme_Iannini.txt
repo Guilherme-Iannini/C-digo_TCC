@@ -5,8 +5,8 @@
 #define FIREBASE_HOST "https://tcc-guilherme-iannini-cd725-default-rtdb.firebaseio.com"
 #define FIREBASE_AUTH "h2dXQeBAH6jwjxRZFrLlLJXBS3m136GXiq7DbJGM"
 
-const char* ssid = "Gui";
-const char* password = "guiga123";
+const char* ssid = "Dutras";
+const char* password = "dutras@369";
 
 #define ANALOG_PIN_0 35
 #define PINO_RELE 27
