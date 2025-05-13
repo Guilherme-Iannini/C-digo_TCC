@@ -1,6 +1,5 @@
 #include <WiFi.h>
 #include <IOXhop_FirebaseESP32.h>
-#include <ArduinoJson.h>
 
 #define FIREBASE_HOST "https://tcc-guilherme-iannini-cd725-default-rtdb.firebaseio.com"
 #define FIREBASE_AUTH "h2dXQeBAH6jwjxRZFrLlLJXBS3m136GXiq7DbJGM"
@@ -11,144 +10,97 @@ const char* password = "dutras@369";
 #define ANALOG_PIN_0 35
 #define PINO_RELE 27
 
+// Configurações básicas
 const float tensaoAC = 127.0;
 const float sensibilidadeSensor = 0.1;
 const float kilowattHora = 0.8;
 
+// Variáveis de estado
 float correnteRms = 0;
 float potencia = 0;
 unsigned long tempoLigado = 0;
 float valorTotal = 0;
+String statusRele = "Desligado";
 
-String statusEquipamento = "desligado";
-String statusAnterior = "";
-
-unsigned long ultimoCiclo = 0;
-const unsigned long intervaloCiclo = 5000;  // 5 segundos
-int contadorCiclos = 0;
-
-void configurarWiFi() {
-  WiFi.begin(ssid, password);
-  Serial.print("Conectando ao Wi-Fi...");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\nWi-Fi conectado.");
-}
-
-float calcularCorrenteRMS() {
-  float somaQuadrados = 0;
-  float filtro;
-  for (int i = 0; i < 500; i++) {
-    int leitura = analogRead(ANALOG_PIN_0) - 1414;
-    somaQuadrados += leitura * leitura;
-    delay(1);
-  }
-  float aux = sqrt(somaQuadrados / 500) * (2.5 / 4096);
-  float corrente = aux / sensibilidadeSensor;
-  if (corrente <= 0.5) {
-    return corrente;
-  } else {
-    filtro =(1.6756 * corrente * corrente) - (1.2907 * corrente) + 0.6432;
-    return filtro;
-  }
-}
-
-void atualizarStatusRele(String status) {
-  if (status == "Ligado") {
-    digitalWrite(PINO_RELE, LOW);  // Relé ativado
-  } else {
-    digitalWrite(PINO_RELE, HIGH); // Relé desativado
-  }
-}
+// Temporizadores
+unsigned long ultimaVerificacaoStatus = 0;
+const unsigned long intervaloVerificacao = 3000; // 3 segundos
+unsigned long ultimoCicloCompleto = 0;
+const unsigned long duracaoCiclo = 20000; // 20 segundos
 
 void setup() {
   Serial.begin(115200);
-  configurarWiFi();
+  
+  // Conexão WiFi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) delay(500);
+  Serial.println("WiFi conectado");
+  
+  // Inicializa Firebase e relé
   Firebase.begin(FIREBASE_HOST, FIREBASE_AUTH);
-
   pinMode(PINO_RELE, OUTPUT);
-  digitalWrite(PINO_RELE, HIGH); // Desligado por padrão
+  digitalWrite(PINO_RELE, HIGH); // Inicia desligado
+  
+  // Carrega tempo inicial
+  tempoLigado = Firebase.getInt("/Tomada1/Tempo_de_Uso/Segundos");
+  if (tempoLigado < 0) tempoLigado = 0;
+}
 
-  int tempoLido = Firebase.getInt("/Tomada1/Tempo_de_Uso/Segundos");
-  tempoLigado = (tempoLido >= 0) ? tempoLido : 0;
+float calcularCorrente() {
+  float soma = 0;
+  for (int i = 0; i < 100; i++) {
+    soma += sq(analogRead(ANALOG_PIN_0) - 1414);
+    delay(1);
+  }
+  float corrente = sqrt(soma / 100) * (2.5 / 4096) / sensibilidadeSensor;
+  return (corrente > 0.5) ? (1.6756 * corrente * corrente) - (1.2907 * corrente) + 0.6432 : corrente;
 }
 
 void loop() {
-  unsigned long tempoAtual = millis();
+  unsigned long agora = millis();
 
-  if (tempoAtual - ultimoCiclo >= intervaloCiclo) {
-    ultimoCiclo = tempoAtual;
-    contadorCiclos++;
-
-    // Lê status do Firebase e limpa formatação
-    String statusLido = Firebase.getString("/Tomada1/Status");
-    statusLido.trim();
-    statusLido.replace("\\", "");
-    statusLido.replace("\"", "");
-
-    if (statusLido.length() > 0 && statusLido != statusAnterior) {
-      statusEquipamento = statusLido;
-      statusAnterior = statusLido;
-      Serial.print("Novo status recebido: ");
-      Serial.println(statusEquipamento);
+  // Verificação do status a cada 3 segundos
+  if (agora - ultimaVerificacaoStatus >= intervaloVerificacao) {
+    ultimaVerificacaoStatus = agora;
+    
+    String novoStatus = Firebase.getString("/Tomada1/Status");
+    novoStatus.replace("\\", "");
+    novoStatus.replace("\"", "");
+    
+    if (novoStatus == "Ligado" || novoStatus == "Desligado") {
+      statusRele = novoStatus;
+      digitalWrite(PINO_RELE, (statusRele == "Ligado") ? LOW : HIGH);
+      
+      // Debug: mostra status lido
+     
     }
+  }
 
-    atualizarStatusRele(statusEquipamento);
-
-    // Medir corrente e potência
-    correnteRms = calcularCorrenteRMS();
+  // Ciclo completo a cada 20 segundos
+  if (agora - ultimoCicloCompleto >= duracaoCiclo) {
+    ultimoCicloCompleto = agora;
+    
+    // Medições
+    correnteRms = calcularCorrente();
     potencia = correnteRms * tensaoAC;
-
-    // Acumula tempo ligado (5 segundos por ciclo)
-    tempoLigado += 5;
-
-    // Só envia dados ao Firebase a cada 2 ciclos (10 segundos)
-    if (contadorCiclos >= 2) {
-      contadorCiclos = 0;
-
-      float consumoSegundo = (potencia / 1000.0) * (1.0 / 3600.0);
-      float valorPorSegundo = consumoSegundo * kilowattHora;
-      float valorPorMinuto = valorPorSegundo * 60.0;
-      float valorPorHora = valorPorMinuto * 60.0;
-      float valorPorDia = valorPorHora * 24.0;
-
-      float valorTotalAntigo = Firebase.getFloat("/Tomada1/Valor/Total_Contabilizado");
-      valorTotal = (isnan(valorTotalAntigo)) ? 0 : valorTotalAntigo + (valorPorSegundo * 10);
-      Firebase.setFloat("/Tomada1/Valor/Total_Contabilizado", valorTotal);
-
-      int dias = tempoLigado / 86400;
-      int horas = (tempoLigado % 86400) / 3600;
-      int minutos = (tempoLigado % 3600) / 60;
-      int segundos = tempoLigado % 60;
-
-      Firebase.setInt("/Tomada1/Tempo_de_Uso/Segundos", segundos);
-      Firebase.setInt("/Tomada1/Tempo_de_Uso/Minutos", minutos);
-      Firebase.setInt("/Tomada1/Tempo_de_Uso/Horas", horas);
-      Firebase.setInt("/Tomada1/Tempo_de_Uso/Dias", dias);
-
-      Firebase.setFloat("/Tomada1/Leitura/Corrente", correnteRms);
-      Firebase.setFloat("/Tomada1/Leitura/Potencia", potencia);
-      Firebase.setFloat("/Tomada1/Valor/Por_Minuto", valorPorMinuto);
-      Firebase.setFloat("/Tomada1/Valor/Por_Hora", valorPorHora);
-      Firebase.setFloat("/Tomada1/Valor/Por_Dia", valorPorDia);
-
-      Serial.println("--- Dados enviados ao Firebase ---");
-      Serial.print("Corrente RMS: ");
-      Serial.print(correnteRms);
-      Serial.println(" A");
-
-      Serial.print("Potência: ");
-      Serial.print(potencia);
-      Serial.println(" W");
-
-      Serial.print("Tempo ligado: ");
-      Serial.print(tempoLigado);
-      Serial.println(" s");
-
-      Serial.print("Valor total acumulado: R$ ");
-      Serial.println(valorTotal);
+    
+    // Atualiza tempo ligado
+    if (statusRele == "Ligado") {
+      tempoLigado += 20; // Incrementa 20 segundos
     }
+    
+    // Cálculos de consumo
+    valorTotal += (potencia / 1000.0) * (20.0/3600.0) * kilowattHora;
+    
+    // Envia dados para Firebase (método alternativo sem updateNode)
+    Firebase.setFloat("/Tomada1/Leitura/Corrente", correnteRms);
+    Firebase.setFloat("/Tomada1/Leitura/Potencia", potencia);
+    Firebase.setFloat("/Tomada1/Valor/Total_Contabilizado", valorTotal);
+    Firebase.setInt("/Tomada1/Tempo_de_Uso/Segundos", tempoLigado % 60);
+    Firebase.setInt("/Tomada1/Tempo_de_Uso/Minutos", (tempoLigado % 3600) / 60);
+    Firebase.setInt("/Tomada1/Tempo_de_Uso/Horas", (tempoLigado % 86400) / 3600);
+    Firebase.setInt("/Tomada1/Tempo_de_Uso/Dias", tempoLigado / 86400);
+    
+  
   }
 }
